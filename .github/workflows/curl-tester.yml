@@ -62,25 +62,36 @@ jobs:
           # Create results directory
           mkdir -p /tmp/curl_results
 
-          # Save curl command to a file for the worker script to read
-          echo "$CURL_CMD" > /tmp/curl_command.txt
+          # Create the curl executor script with the command embedded
+          cat > /tmp/curl_executor.sh << 'EXECUTOR_EOF'
+          #!/bin/bash
+          # This script is generated - it runs the user's curl command with metrics
+          EXECUTOR_EOF
 
-          # Create a temporary script file to execute the curl command
-          cat << 'CURL_SCRIPT' > /tmp/run_curl.sh
+          # Append the curl command with metrics (using heredoc without quotes to expand CURL_CMD)
+          cat >> /tmp/curl_executor.sh << CURL_EOF
+          $CURL_CMD -w '
+          ---CURL_METRICS---
+          HTTP_CODE: %{http_code}
+          TIME_TOTAL: %{time_total}s
+          TIME_CONNECT: %{time_connect}s
+          TIME_STARTTRANSFER: %{time_starttransfer}s
+          SIZE_DOWNLOAD: %{size_download} bytes
+          ' -s
+          CURL_EOF
+
+          chmod +x /tmp/curl_executor.sh
+
+          # Create the worker script
+          cat << 'WORKER_SCRIPT' > /tmp/run_curl.sh
           #!/bin/bash
           REQUEST_NUM=$1
           RESULT_FILE="/tmp/curl_results/request_${REQUEST_NUM}.txt"
 
-          # Read the curl command from file
-          CURL_CMD=$(cat /tmp/curl_command.txt)
-
           echo "--- Request #${REQUEST_NUM} ---" | tee "$RESULT_FILE"
 
-          # Define the write-out format with proper newlines
-          WRITE_FORMAT=$'\n---CURL_METRICS---\nHTTP_CODE: %{http_code}\nTIME_TOTAL: %{time_total}s\nTIME_CONNECT: %{time_connect}s\nTIME_STARTTRANSFER: %{time_starttransfer}s\nSIZE_DOWNLOAD: %{size_download} bytes\n'
-
-          # Execute the curl command and capture response
-          RESPONSE=$(eval "$CURL_CMD" -w "$WRITE_FORMAT" -s 2>&1)
+          # Execute the curl command script and capture response
+          RESPONSE=$(/tmp/curl_executor.sh 2>&1)
           EXIT_CODE=$?
 
           echo "Response:" | tee -a "$RESULT_FILE"
@@ -96,7 +107,7 @@ jobs:
           else
             echo "FAILURE" > "/tmp/curl_results/status_${REQUEST_NUM}.txt"
           fi
-          CURL_SCRIPT
+          WORKER_SCRIPT
 
           chmod +x /tmp/run_curl.sh
 
