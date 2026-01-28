@@ -1,0 +1,289 @@
+name: cURL Tester
+
+on:
+  workflow_dispatch:
+    inputs:
+      curl_command:
+        description: 'Complete cURL command to execute (e.g., curl -X GET https://api.example.com/endpoint)'
+        required: true
+        type: string
+      parallel_requests:
+        description: 'Number of parallel requests to send'
+        required: true
+        default: '1'
+        type: string
+
+jobs:
+  curl-test:
+    runs-on: ubuntu-latest
+    outputs:
+      test_report: ${{ steps.run_tests.outputs.report }}
+      success_count: ${{ steps.run_tests.outputs.success_count }}
+      failure_count: ${{ steps.run_tests.outputs.failure_count }}
+      total_requests: ${{ steps.run_tests.outputs.total_requests }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          echo "=== Input Validation ==="
+
+          # Validate parallel_requests is a positive integer
+          if ! [[ "${{ inputs.parallel_requests }}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: parallel_requests must be a positive integer"
+            exit 1
+          fi
+
+          # Check if curl command starts with 'curl'
+          if [[ ! "${{ inputs.curl_command }}" =~ ^curl[[:space:]] ]]; then
+            echo "Error: Command must start with 'curl'"
+            exit 1
+          fi
+
+          echo "Inputs validated successfully"
+          echo "cURL command: ${{ inputs.curl_command }}"
+          echo "Parallel requests: ${{ inputs.parallel_requests }}"
+
+      - name: Execute parallel cURL requests
+        id: run_tests
+        run: |
+          echo "=== Starting cURL Test ==="
+          echo "Sending ${{ inputs.parallel_requests }} parallel requests..."
+          echo ""
+
+          # Create results directory
+          mkdir -p /tmp/curl_results
+
+          # Create a temporary script file to execute the curl command
+          cat << 'CURL_SCRIPT' > /tmp/run_curl.sh
+          #!/bin/bash
+          REQUEST_NUM=$1
+          RESULT_FILE="/tmp/curl_results/request_${REQUEST_NUM}.txt"
+
+          echo "--- Request #${REQUEST_NUM} ---" | tee "$RESULT_FILE"
+          START_TIME=$(date +%s.%N)
+
+          # Execute the curl command and capture response
+          RESPONSE=$(${{ inputs.curl_command }} -w "\n---CURL_METRICS---\nHTTP_CODE: %{http_code}\nTIME_TOTAL: %{time_total}s\nTIME_CONNECT: %{time_connect}s\nTIME_STARTTRANSFER: %{time_starttransfer}s\nSIZE_DOWNLOAD: %{size_download} bytes\n" -s 2>&1)
+          EXIT_CODE=$?
+
+          END_TIME=$(date +%s.%N)
+
+          echo "Response:" | tee -a "$RESULT_FILE"
+          echo "$RESPONSE" | tee -a "$RESULT_FILE"
+          echo "" | tee -a "$RESULT_FILE"
+          echo "Exit Code: $EXIT_CODE" | tee -a "$RESULT_FILE"
+          echo "Request #${REQUEST_NUM} completed" | tee -a "$RESULT_FILE"
+          echo "" | tee -a "$RESULT_FILE"
+
+          # Save status for aggregation
+          if [ $EXIT_CODE -eq 0 ] && echo "$RESPONSE" | grep -q "HTTP_CODE: 2"; then
+            echo "SUCCESS" > "/tmp/curl_results/status_${REQUEST_NUM}.txt"
+          else
+            echo "FAILURE" > "/tmp/curl_results/status_${REQUEST_NUM}.txt"
+          fi
+          CURL_SCRIPT
+
+          chmod +x /tmp/run_curl.sh
+
+          # Run requests in parallel using xargs
+          echo "Executing ${{ inputs.parallel_requests }} requests in parallel..."
+          echo ""
+
+          seq 1 ${{ inputs.parallel_requests }} | xargs -P ${{ inputs.parallel_requests }} -I {} /tmp/run_curl.sh {}
+
+          echo ""
+          echo "=== All requests completed ==="
+
+          # Aggregate results
+          SUCCESS_COUNT=$(grep -l "SUCCESS" /tmp/curl_results/status_*.txt 2>/dev/null | wc -l)
+          FAILURE_COUNT=$(grep -l "FAILURE" /tmp/curl_results/status_*.txt 2>/dev/null | wc -l)
+          TOTAL_REQUESTS=${{ inputs.parallel_requests }}
+
+          echo "success_count=${SUCCESS_COUNT}" >> $GITHUB_OUTPUT
+          echo "failure_count=${FAILURE_COUNT}" >> $GITHUB_OUTPUT
+          echo "total_requests=${TOTAL_REQUESTS}" >> $GITHUB_OUTPUT
+
+          # Create report summary
+          REPORT="Total: ${TOTAL_REQUESTS} | Success: ${SUCCESS_COUNT} | Failed: ${FAILURE_COUNT}"
+          echo "report=${REPORT}" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "=== Results Summary ==="
+          echo "Total Requests: ${TOTAL_REQUESTS}"
+          echo "Successful: ${SUCCESS_COUNT}"
+          echo "Failed: ${FAILURE_COUNT}"
+
+      - name: Summary
+        run: |
+          echo "## cURL Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**cURL Command:** \`${{ inputs.curl_command }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Parallel Requests:** ${{ inputs.parallel_requests }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Requests | ${{ steps.run_tests.outputs.total_requests }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Successful | ${{ steps.run_tests.outputs.success_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Failed | ${{ steps.run_tests.outputs.failure_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Test completed!" >> $GITHUB_STEP_SUMMARY
+
+  slack-notification:
+    needs: curl-test
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Send Slack Report
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "Warning: SLACK_WEBHOOK_URL secret is not set. Skipping Slack notification."
+            exit 0
+          fi
+
+          # Determine status emoji and color
+          if [ "${{ needs.curl-test.outputs.failure_count }}" -gt 0 ]; then
+            STATUS_EMOJI=":warning:"
+            COLOR="#ff9800"
+            STATUS_TEXT="Completed with failures"
+          else
+            STATUS_EMOJI=":white_check_mark:"
+            COLOR="#36a64f"
+            STATUS_TEXT="All requests successful"
+          fi
+
+          # Send Slack message
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d @- << EOF
+          {
+            "attachments": [
+              {
+                "color": "${COLOR}",
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "${STATUS_EMOJI} cURL Test Report",
+                      "emoji": true
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Status:*\n${STATUS_TEXT}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Run ID:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|#${{ github.run_number }}>"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Total Requests:*\n${{ needs.curl-test.outputs.total_requests }}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Successful:*\n${{ needs.curl-test.outputs.success_count }}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Failed:*\n${{ needs.curl-test.outputs.failure_count }}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Triggered by:*\n${{ github.actor }}"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "*cURL Command:*\n\`\`\`${{ inputs.curl_command }}\`\`\`"
+                    }
+                  },
+                  {
+                    "type": "context",
+                    "elements": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "Repository: *${{ github.repository }}* | Branch: *${{ github.ref_name }}*"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+
+          echo "Slack notification sent successfully!"
+
+  cleanup-old-runs:
+    needs: [curl-test, slack-notification]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Delete old workflow runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Cleaning up old workflow runs ==="
+
+          # Get workflow runs older than the current one (keep last 5 runs)
+          WORKFLOW_ID="curl-tester.yml"
+          REPO="${{ github.repository }}"
+          CURRENT_RUN_ID="${{ github.run_id }}"
+
+          echo "Current run ID: ${CURRENT_RUN_ID}"
+          echo "Repository: ${REPO}"
+
+          # List all runs for this workflow, skip the most recent 5
+          echo "Fetching workflow runs..."
+
+          RUNS_TO_DELETE=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?per_page=100&status=completed" \
+            --jq '.workflow_runs | sort_by(.created_at) | reverse | .[5:] | .[].id' 2>/dev/null || echo "")
+
+          if [ -z "$RUNS_TO_DELETE" ]; then
+            echo "No old runs to delete (keeping last 5 runs)"
+            exit 0
+          fi
+
+          # Delete old runs
+          DELETE_COUNT=0
+          for RUN_ID in $RUNS_TO_DELETE; do
+            echo "Deleting run ID: ${RUN_ID}"
+            if gh api \
+              --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${REPO}/actions/runs/${RUN_ID}" 2>/dev/null; then
+              DELETE_COUNT=$((DELETE_COUNT + 1))
+              echo "Successfully deleted run ${RUN_ID}"
+            else
+              echo "Failed to delete run ${RUN_ID} (may already be deleted or in progress)"
+            fi
+          done
+
+          echo ""
+          echo "=== Cleanup completed ==="
+          echo "Deleted ${DELETE_COUNT} old workflow runs"
