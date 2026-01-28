@@ -76,8 +76,11 @@ jobs:
 
           echo "--- Request #${REQUEST_NUM} ---" | tee "$RESULT_FILE"
 
+          # Define the write-out format with proper newlines
+          WRITE_FORMAT=$'\n---CURL_METRICS---\nHTTP_CODE: %{http_code}\nTIME_TOTAL: %{time_total}s\nTIME_CONNECT: %{time_connect}s\nTIME_STARTTRANSFER: %{time_starttransfer}s\nSIZE_DOWNLOAD: %{size_download} bytes\n'
+
           # Execute the curl command and capture response
-          RESPONSE=$(eval "$CURL_CMD" -w "\n---CURL_METRICS---\nHTTP_CODE: %{http_code}\nTIME_TOTAL: %{time_total}s\nTIME_CONNECT: %{time_connect}s\nTIME_STARTTRANSFER: %{time_starttransfer}s\nSIZE_DOWNLOAD: %{size_download} bytes\n" -s 2>&1)
+          RESPONSE=$(eval "$CURL_CMD" -w "$WRITE_FORMAT" -s 2>&1)
           EXIT_CODE=$?
 
           echo "Response:" | tee -a "$RESULT_FILE"
