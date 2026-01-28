@@ -69,15 +69,16 @@ jobs:
           EXECUTOR_EOF
 
           # Append the curl command with metrics (using heredoc without quotes to expand CURL_CMD)
+          # Note: -s must come BEFORE -w to ensure it's processed as a flag, not as a URL
           cat >> /tmp/curl_executor.sh << CURL_EOF
-          $CURL_CMD -w '
+          $CURL_CMD -s -w '
           ---CURL_METRICS---
           HTTP_CODE: %{http_code}
           TIME_TOTAL: %{time_total}s
           TIME_CONNECT: %{time_connect}s
           TIME_STARTTRANSFER: %{time_starttransfer}s
           SIZE_DOWNLOAD: %{size_download} bytes
-          ' -s
+          '
           CURL_EOF
 
           chmod +x /tmp/curl_executor.sh
