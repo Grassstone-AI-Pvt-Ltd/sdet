@@ -27,34 +27,43 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate inputs
+        env:
+          CURL_CMD: ${{ inputs.curl_command }}
+          PARALLEL_REQ: ${{ inputs.parallel_requests }}
         run: |
           echo "=== Input Validation ==="
 
           # Validate parallel_requests is a positive integer
-          if ! [[ "${{ inputs.parallel_requests }}" =~ ^[1-9][0-9]*$ ]]; then
+          if ! [[ "$PARALLEL_REQ" =~ ^[1-9][0-9]*$ ]]; then
             echo "Error: parallel_requests must be a positive integer"
             exit 1
           fi
 
           # Check if curl command starts with 'curl'
-          if [[ ! "${{ inputs.curl_command }}" =~ ^curl[[:space:]] ]]; then
+          if [[ ! "$CURL_CMD" =~ ^curl[[:space:]] ]]; then
             echo "Error: Command must start with 'curl'"
             exit 1
           fi
 
           echo "Inputs validated successfully"
-          echo "cURL command: ${{ inputs.curl_command }}"
-          echo "Parallel requests: ${{ inputs.parallel_requests }}"
+          echo "cURL command: $CURL_CMD"
+          echo "Parallel requests: $PARALLEL_REQ"
 
       - name: Execute parallel cURL requests
         id: run_tests
+        env:
+          CURL_CMD: ${{ inputs.curl_command }}
+          PARALLEL_REQ: ${{ inputs.parallel_requests }}
         run: |
           echo "=== Starting cURL Test ==="
-          echo "Sending ${{ inputs.parallel_requests }} parallel requests..."
+          echo "Sending $PARALLEL_REQ parallel requests..."
           echo ""
 
           # Create results directory
           mkdir -p /tmp/curl_results
+
+          # Save curl command to a file for the worker script to read
+          echo "$CURL_CMD" > /tmp/curl_command.txt
 
           # Create a temporary script file to execute the curl command
           cat << 'CURL_SCRIPT' > /tmp/run_curl.sh
@@ -62,14 +71,14 @@ jobs:
           REQUEST_NUM=$1
           RESULT_FILE="/tmp/curl_results/request_${REQUEST_NUM}.txt"
 
+          # Read the curl command from file
+          CURL_CMD=$(cat /tmp/curl_command.txt)
+
           echo "--- Request #${REQUEST_NUM} ---" | tee "$RESULT_FILE"
-          START_TIME=$(date +%s.%N)
 
           # Execute the curl command and capture response
-          RESPONSE=$(${{ inputs.curl_command }} -w "\n---CURL_METRICS---\nHTTP_CODE: %{http_code}\nTIME_TOTAL: %{time_total}s\nTIME_CONNECT: %{time_connect}s\nTIME_STARTTRANSFER: %{time_starttransfer}s\nSIZE_DOWNLOAD: %{size_download} bytes\n" -s 2>&1)
+          RESPONSE=$(eval "$CURL_CMD" -w "\n---CURL_METRICS---\nHTTP_CODE: %{http_code}\nTIME_TOTAL: %{time_total}s\nTIME_CONNECT: %{time_connect}s\nTIME_STARTTRANSFER: %{time_starttransfer}s\nSIZE_DOWNLOAD: %{size_download} bytes\n" -s 2>&1)
           EXIT_CODE=$?
-
-          END_TIME=$(date +%s.%N)
 
           echo "Response:" | tee -a "$RESULT_FILE"
           echo "$RESPONSE" | tee -a "$RESULT_FILE"
@@ -89,10 +98,10 @@ jobs:
           chmod +x /tmp/run_curl.sh
 
           # Run requests in parallel using xargs
-          echo "Executing ${{ inputs.parallel_requests }} requests in parallel..."
+          echo "Executing $PARALLEL_REQ requests in parallel..."
           echo ""
 
-          seq 1 ${{ inputs.parallel_requests }} | xargs -P ${{ inputs.parallel_requests }} -I {} /tmp/run_curl.sh {}
+          seq 1 "$PARALLEL_REQ" | xargs -P "$PARALLEL_REQ" -I {} /tmp/run_curl.sh {}
 
           echo ""
           echo "=== All requests completed ==="
@@ -100,7 +109,7 @@ jobs:
           # Aggregate results
           SUCCESS_COUNT=$(grep -l "SUCCESS" /tmp/curl_results/status_*.txt 2>/dev/null | wc -l)
           FAILURE_COUNT=$(grep -l "FAILURE" /tmp/curl_results/status_*.txt 2>/dev/null | wc -l)
-          TOTAL_REQUESTS=${{ inputs.parallel_requests }}
+          TOTAL_REQUESTS="$PARALLEL_REQ"
 
           echo "success_count=${SUCCESS_COUNT}" >> $GITHUB_OUTPUT
           echo "failure_count=${FAILURE_COUNT}" >> $GITHUB_OUTPUT
@@ -117,19 +126,25 @@ jobs:
           echo "Failed: ${FAILURE_COUNT}"
 
       - name: Summary
+        env:
+          CURL_CMD: ${{ inputs.curl_command }}
+          PARALLEL_REQ: ${{ inputs.parallel_requests }}
+          TOTAL_REQ: ${{ steps.run_tests.outputs.total_requests }}
+          SUCCESS_CNT: ${{ steps.run_tests.outputs.success_count }}
+          FAILURE_CNT: ${{ steps.run_tests.outputs.failure_count }}
         run: |
           echo "## cURL Test Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**cURL Command:** \`${{ inputs.curl_command }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**cURL Command:** \`$CURL_CMD\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Parallel Requests:** ${{ inputs.parallel_requests }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Parallel Requests:** $PARALLEL_REQ" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Results" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Total Requests | ${{ steps.run_tests.outputs.total_requests }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Successful | ${{ steps.run_tests.outputs.success_count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Failed | ${{ steps.run_tests.outputs.failure_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Requests | $TOTAL_REQ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Successful | $SUCCESS_CNT |" >> $GITHUB_STEP_SUMMARY
+          echo "| Failed | $FAILURE_CNT |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Test completed!" >> $GITHUB_STEP_SUMMARY
 
@@ -142,6 +157,16 @@ jobs:
       - name: Send Slack Report
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          CURL_CMD: ${{ inputs.curl_command }}
+          FAILURE_COUNT: ${{ needs.curl-test.outputs.failure_count }}
+          TOTAL_REQUESTS: ${{ needs.curl-test.outputs.total_requests }}
+          SUCCESS_COUNT: ${{ needs.curl-test.outputs.success_count }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_RUN_NUMBER: ${{ github.run_number }}
+          GH_ACTOR: ${{ github.actor }}
+          GH_REF_NAME: ${{ github.ref_name }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "Warning: SLACK_WEBHOOK_URL secret is not set. Skipping Slack notification."
@@ -149,7 +174,7 @@ jobs:
           fi
 
           # Determine status emoji and color
-          if [ "${{ needs.curl-test.outputs.failure_count }}" -gt 0 ]; then
+          if [ "${FAILURE_COUNT:-0}" -gt 0 ]; then
             STATUS_EMOJI=":warning:"
             COLOR="#ff9800"
             STATUS_TEXT="Completed with failures"
@@ -158,6 +183,9 @@ jobs:
             COLOR="#36a64f"
             STATUS_TEXT="All requests successful"
           fi
+
+          # Escape curl command for JSON
+          CURL_CMD_ESCAPED=$(echo "$CURL_CMD" | sed 's/\\/\\\\/g; s/"/\\"/g; s/`/\\`/g')
 
           # Send Slack message
           curl -X POST "$SLACK_WEBHOOK_URL" \
@@ -185,7 +213,7 @@ jobs:
                       },
                       {
                         "type": "mrkdwn",
-                        "text": "*Run ID:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|#${{ github.run_number }}>"
+                        "text": "*Run ID:*\n<${GH_SERVER_URL}/${GH_REPOSITORY}/actions/runs/${GH_RUN_ID}|#${GH_RUN_NUMBER}>"
                       }
                     ]
                   },
@@ -194,19 +222,19 @@ jobs:
                     "fields": [
                       {
                         "type": "mrkdwn",
-                        "text": "*Total Requests:*\n${{ needs.curl-test.outputs.total_requests }}"
+                        "text": "*Total Requests:*\n${TOTAL_REQUESTS}"
                       },
                       {
                         "type": "mrkdwn",
-                        "text": "*Successful:*\n${{ needs.curl-test.outputs.success_count }}"
+                        "text": "*Successful:*\n${SUCCESS_COUNT}"
                       },
                       {
                         "type": "mrkdwn",
-                        "text": "*Failed:*\n${{ needs.curl-test.outputs.failure_count }}"
+                        "text": "*Failed:*\n${FAILURE_COUNT}"
                       },
                       {
                         "type": "mrkdwn",
-                        "text": "*Triggered by:*\n${{ github.actor }}"
+                        "text": "*Triggered by:*\n${GH_ACTOR}"
                       }
                     ]
                   },
@@ -214,7 +242,7 @@ jobs:
                     "type": "section",
                     "text": {
                       "type": "mrkdwn",
-                      "text": "*cURL Command:*\n\`\`\`${{ inputs.curl_command }}\`\`\`"
+                      "text": "*cURL Command:*\n\`\`\`${CURL_CMD_ESCAPED}\`\`\`"
                     }
                   },
                   {
@@ -222,7 +250,7 @@ jobs:
                     "elements": [
                       {
                         "type": "mrkdwn",
-                        "text": "Repository: *${{ github.repository }}* | Branch: *${{ github.ref_name }}*"
+                        "text": "Repository: *${GH_REPOSITORY}* | Branch: *${GH_REF_NAME}*"
                       }
                     ]
                   }
