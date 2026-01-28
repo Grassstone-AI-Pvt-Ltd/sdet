@@ -1,0 +1,90 @@
+name: cURL Tester
+
+on:
+  workflow_dispatch:
+    inputs:
+      curl_command:
+        description: 'Complete cURL command to execute (e.g., curl -X GET https://api.example.com/endpoint)'
+        required: true
+        type: string
+      parallel_requests:
+        description: 'Number of parallel requests to send'
+        required: true
+        default: '1'
+        type: string
+
+jobs:
+  curl-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          echo "=== Input Validation ==="
+
+          # Validate parallel_requests is a positive integer
+          if ! [[ "${{ inputs.parallel_requests }}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: parallel_requests must be a positive integer"
+            exit 1
+          fi
+
+          # Check if curl command starts with 'curl'
+          if [[ ! "${{ inputs.curl_command }}" =~ ^curl[[:space:]] ]]; then
+            echo "Error: Command must start with 'curl'"
+            exit 1
+          fi
+
+          echo "Inputs validated successfully"
+          echo "cURL command: ${{ inputs.curl_command }}"
+          echo "Parallel requests: ${{ inputs.parallel_requests }}"
+
+      - name: Execute parallel cURL requests
+        run: |
+          echo "=== Starting cURL Test ==="
+          echo "Sending ${{ inputs.parallel_requests }} parallel requests..."
+          echo ""
+
+          # Create a temporary script file to execute the curl command
+          cat << 'CURL_SCRIPT' > /tmp/run_curl.sh
+          #!/bin/bash
+          REQUEST_NUM=$1
+          echo "--- Request #${REQUEST_NUM} ---"
+          START_TIME=$(date +%s.%N)
+
+          # Execute the curl command and capture response
+          RESPONSE=$(${{ inputs.curl_command }} -w "\n---CURL_METRICS---\nHTTP_CODE: %{http_code}\nTIME_TOTAL: %{time_total}s\nTIME_CONNECT: %{time_connect}s\nTIME_STARTTRANSFER: %{time_starttransfer}s\nSIZE_DOWNLOAD: %{size_download} bytes\n" -s 2>&1)
+          EXIT_CODE=$?
+
+          END_TIME=$(date +%s.%N)
+
+          echo "Response:"
+          echo "$RESPONSE"
+          echo ""
+          echo "Exit Code: $EXIT_CODE"
+          echo "Request #${REQUEST_NUM} completed"
+          echo ""
+          CURL_SCRIPT
+
+          chmod +x /tmp/run_curl.sh
+
+          # Run requests in parallel using GNU parallel or xargs
+          echo "Executing ${{ inputs.parallel_requests }} requests in parallel..."
+          echo ""
+
+          seq 1 ${{ inputs.parallel_requests }} | xargs -P ${{ inputs.parallel_requests }} -I {} /tmp/run_curl.sh {}
+
+          echo ""
+          echo "=== All requests completed ==="
+
+      - name: Summary
+        run: |
+          echo "## cURL Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**cURL Command:** \`${{ inputs.curl_command }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Parallel Requests:** ${{ inputs.parallel_requests }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Test completed successfully!" >> $GITHUB_STEP_SUMMARY
